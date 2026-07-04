@@ -1,0 +1,6 @@
+torch>=2.2
+transformers>=4.56
+peft>=0.13
+accelerate
+# NOTE: on Google Colab also run `pip uninstall -y torchao` — the preinstalled
+# torchao 0.10 is rejected by recent peft at get_peft_model (see README > Gotchas).

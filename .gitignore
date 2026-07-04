@@ -1,0 +1,16 @@
+# trained adapters (regenerate by running the pipeline)
+lfm2_1.2b_proxy_sft_lora/
+lfm2_1.2b_proxy_dpo_lora/
+lfm25_350m_ac_proxykd_lora/
+lfm25_350m_ac_proxykd_nothink_lora/
+lfm25_350m_ac_sft_baseline_lora/
+*_lora/
+
+# python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# hf / misc
+*.safetensors
+.cache/
