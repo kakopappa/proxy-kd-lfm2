@@ -231,6 +231,65 @@ next levers are proxy SFT (`run_a1=True`), more/paraphrased data, or a bigger st
 
 ---
 
+## When does each knob help? (Stage-A and KD-temperature ablations)
+
+We pushed two more knobs to find out where the remaining errors actually come from. The short
+answer: **once the proxy is grounded, neither knob buys factual accuracy** — the bottleneck has
+moved off the teacher.
+
+### Stage A: SFT the grounded proxy (`main(run_a1=True)`)
+
+SFT-ing the grounded 2.6B on the teacher's answers made it an almost-perfect Claude replica:
+
+| Proxy confidence `mu` (mean logprob of Claude's answer) | ungrounded 1.2B | grounded 2.6B zero-shot | **grounded 2.6B + Stage-A** |
+|---|---|---|---|
+| | −1.68 | −0.98 | **−0.28** (≈ 75%/token) |
+
+The proxy's own wrong facts got corrected (e.g. the "set both timers" question flipped wrong →
+right). **But the student's held-out accuracy did not improve (~3/6, same as zero-shot grounded).**
+Two reasons:
+
+1. **The bottleneck moved.** Q2/Q4 fail on *held-out phrasings* — a 350M-capacity + 185-example
+   limit that a better teacher can't fix.
+2. **A too-confident teacher regularizes less.** The peaked SFT'd soft-labels dropped `w·kl` from
+   ~0.19 → ~0.08, so the student overfit *harder* (NLL 0.14 → 0.07). Stage A improved the teacher
+   but quietly weakened the KD regularizer that was helping the student.
+
+> Note on cost: Stage A back-props through the ~11.5k-token grounded context on the 2.6B, so it needs
+> `gradient_checkpointing_enable()` **and** `enable_input_require_grads()` (frozen base + checkpointing
+> won't propagate gradients otherwise). ~50 min on an L4.
+
+### KD temperature (`T = 2`, soften the KL only, keep NLL at `T = 1`)
+
+To restore the regularization Stage A removed, we re-distilled with the KL softened at `T=2` (×T² to
+keep its weight) while pinning the hard-label NLL at `T=1`. Regularization came back (`w·kl` ~0.4–2.2,
+slower NLL descent) — and the effect on outputs was revealing:
+
+- **Formatting generalization improved** — the louvers answer became a near-perfect step list.
+- **Factual accuracy did not** — and one question *regressed*: the 98°F/COOL answer flipped from a
+  correct "No" to a self-contradiction ("Yes… since 98°F is above the upper limit, you can still
+  operate").
+
+**Why:** a fact lives in the distribution's **peak** (the yes/no token). Temperature deliberately
+flattens peaks — great for transferring open-ended *style*, bad for *decisiveness* on factual tokens.
+So KD temperature is a **form-vs-fact dial, not an accuracy dial**.
+
+### Takeaway
+
+| Knob | What it fixes | What it can't fix |
+|---|---|---|
+| Ground + enlarge the proxy | teacher fidelity (the ceiling) | — this was the big win |
+| Stage-A proxy SFT | teacher fidelity even further | student accuracy (bottleneck moved) |
+| KD temperature | formatting / style transfer | facts (can even hurt decisiveness) |
+
+The remaining errors are **data-coverage / student-capacity bound**. The smoking gun: the student
+*aces* "Can PLASMACLUSTER be used in VENTILATION?" but *confabulates* "What happens if you press
+PLASMACLUSTER in VENTILATION?" — the **same fact, reworded**. The one lever that targets this is
+**data augmentation**: express each fact in several phrasings so the student generalizes past
+memorizing one wording. (A bigger student would also help.)
+
+---
+
 ## Limitations & next steps
 - **Raise the proxy's fidelity** (the real lever): give the proxy the manual *in context* during
   Stage A (RAG the teacher) so it stops confabulating, or use a larger/stronger proxy.
