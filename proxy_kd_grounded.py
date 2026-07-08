@@ -134,9 +134,11 @@ def load_proxy(adapter=None, merge=False, trainable=False):
 # --------- Optional Stage A: SFT the grounded proxy on the teacher's answers ----------------
 def train_proxy_sft(pairs):
     print("\n===== Stage A: GROUNDED Proxy SFT (optional) =====")
-    proxy = load_proxy()
-    proxy.gradient_checkpointing_enable()                    # 11.5k-token backward is memory-heavy
-    proxy = get_peft_model(proxy, LoraConfig(**PROXY_LORA))
+    base = load_proxy()
+    base.config.use_cache = False
+    base.gradient_checkpointing_enable()                     # 11.5k-token backward is memory-heavy
+    base.enable_input_require_grads()                        # frozen base + checkpointing -> let grads flow
+    proxy = get_peft_model(base, LoraConfig(**PROXY_LORA))
     proxy.print_trainable_parameters()
     opt = torch.optim.AdamW([p for p in proxy.parameters() if p.requires_grad], lr=A1_LR)
     proxy.train(); step = 0
