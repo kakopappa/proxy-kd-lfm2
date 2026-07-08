@@ -72,10 +72,12 @@ where $\mu, \gamma$ are the mean/std of the proxy's **per-token** log-likelihood
 
 | File | What it is |
 |------|-----------|
-| `proxy_kd.py` | The whole implementation — imports, config, data, the three stages, eval, `main()`. Read this first. |
-| `proxy_kd_colab.ipynb` | The same code split into Colab cells (install → upload data → config → code → run). |
+| `proxy_kd.py` | The whole base implementation — imports, config, data, the three stages, eval, `main()`. Read this first. |
+| `proxy_kd_grounded.py` | The **grounded variant** (LFM2-2.6B proxy + manual in-context + cached soft-labels). The stronger version — see *Grounded variant* below. |
+| `proxy_kd_colab.ipynb` | The base code split into Colab cells (install → upload data → config → code → run). |
 | `ac_manual_synth_tra.jsonl` | 185 training Q&A pairs (Claude answers, ChatML, with `<think>` blocks). |
 | `ac_manual_synth_val.jsonl` | 32 held-out validation Q&A pairs. |
+| `sharp_cv_p09fx_manual_en_cleaned.md` | Cleaned English manual — the grounding source for `proxy_kd_grounded.py`. |
 | `requirements.txt` | `transformers`, `peft`, `accelerate`, `torch`. |
 
 ### Data format
@@ -185,6 +187,47 @@ correctly-stopping answers:
 > …
 
 Fluent and on-topic; factual precision is bounded by the 1.2B proxy (see Finding #5).
+
+---
+
+## Grounded variant — raising the ceiling (`proxy_kd_grounded.py`)
+
+Finding #5 says the proxy's fidelity is the ceiling. So we attacked the proxy directly, two ways at
+once (`proxy_kd_grounded.py`):
+
+1. **Bigger proxy:** `LFM2-2.6B` instead of `LFM2-1.2B` (still vocab 65536 → token-level KL intact).
+2. **Grounded proxy:** the **full manual (~11.5k tokens) goes in the proxy's system context**, so it
+   answers from the text instead of confabulating. The student still never sees the manual — the
+   grounded knowledge moves into its weights. This fuses Proxy-KD with *context-distillation*.
+
+Efficiency: the proxy is frozen and teacher-forced on fixed answer tokens, so its soft-labels are
+**cached once** (one forward per example) rather than recomputed every epoch — the long manual
+context is paid a single time. The proxy is used **zero-shot** by default (a grounded 2.6B is
+already a strong teacher); `main(run_a1=True)` optionally SFTs it first.
+
+**Results (vs the ungrounded 1.2B proxy), on the same 32-question val set:**
+
+| | Ungrounded 1.2B | **Grounded 2.6B** |
+|---|---|---|
+| Fluency / format / stopping | broke into multilingual salad | clean, structured, stops ✅ |
+| Proxy confidence `mu` (mean logprob of gold answer) | −1.68 | **−0.98** |
+| Factual accuracy (qualitative) | hallucinated freely | ~4/6 correct, quotes the manual ✅ |
+
+Example — the student now matches the teacher *and quotes the source*:
+
+> **Q: Can PLASMACLUSTER be used during VENTILATION mode?**
+> **Student:** "No, the PLASMACLUSTER function cannot be used during VENTILATION mode. The manual
+> states: *'The PLASMACLUSTER function cannot be used during VENTILATION mode.'*"
+
+**A surprising result: the student sometimes beats its own proxy teacher.** On "can I run COOL mode
+at 98°F?" the zero-shot proxy wrongly said *yes*; the student correctly said *no*. The student gets
+the best of both signals — the teacher's *correct* answers via the hard-label NLL **and** the
+grounded soft-labels via KD — so it stays anchored on truth even where the proxy drifts.
+
+**What's still imperfect:** subtle facts and cross-phrasing generalization (it nailed the
+PLASMACLUSTER fact in one phrasing but confabulated it in another). That residual is now bounded by
+the **350M student's capacity** and the **185-example coverage** — no longer by the teacher. The
+next levers are proxy SFT (`run_a1=True`), more/paraphrased data, or a bigger student.
 
 ---
 
