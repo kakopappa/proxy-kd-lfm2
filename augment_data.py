@@ -36,8 +36,8 @@ TRAIN_IN    = "ac_manual_synth_tra.jsonl"   # existing 185 Claude pairs (kept)
 VAL_IN      = "ac_manual_synth_val.jsonl"   # 32 held-out (used only for anti-leakage dedup)
 TRAIN_OUT   = "ac_manual_synth_tra_aug.jsonl"
 
-N_NEW       = 500     # target NEW kept examples (on top of the existing 185)
-MAX_WORKERS = 6
+N_NEW       = 300     # target NEW kept examples (on top of the existing 185)
+MAX_WORKERS = 3       # DeepInfra rate-limits higher concurrency -> backoff stalls throughput
 SEED        = 0
 
 SYSTEM = ("You are a helpful assistant for the Sharp CV-P09FX portable air conditioner. "
@@ -122,20 +122,27 @@ def load_questions(path):
     return qs
 
 # ------------------------------- LLM calls --------------------------------------------------
-client = OpenAI(base_url=BASE_URL, api_key=os.environ.get("DEEPINFRA_API_KEY", ""))
+client = OpenAI(base_url=BASE_URL, api_key=os.environ.get("DEEPINFRA_API_KEY", ""),
+                timeout=45, max_retries=1)
 
 def _json_call(model, prompt, temperature=0.7, max_tokens=900):
-    r = client.chat.completions.create(
-        model=model, temperature=temperature,
-        messages=[{"role": "user", "content": prompt}],
-        response_format={"type": "json_object"}, max_tokens=max_tokens,
-    )
-    txt = r.choices[0].message.content
+    try:
+        r = client.chat.completions.create(
+            model=model, temperature=temperature,
+            messages=[{"role": "user", "content": prompt}],
+            response_format={"type": "json_object"}, max_tokens=max_tokens,
+        )
+        txt = r.choices[0].message.content
+    except Exception:
+        return None
     try:
         return json.loads(txt)
-    except json.JSONDecodeError:
-        m = re.search(r"\{.*\}", txt, re.DOTALL)
-        return json.loads(m.group()) if m else None
+    except (json.JSONDecodeError, TypeError):
+        m = re.search(r"\{.*\}", txt or "", re.DOTALL)
+        try:
+            return json.loads(m.group()) if m else None
+        except json.JSONDecodeError:
+            return None
 
 def gen_qa(chunk, qtype, phrasing, difficulty):
     prompt = (
@@ -207,15 +214,16 @@ def main():
     seen = set(norm_q(q) for q in load_questions(TRAIN_IN) + load_questions(VAL_IN))
     print(f"Existing questions (train+val, for dedup): {len(seen)}")
 
-    kept, lock_seen = [], set()
+    kept, lock_seen, done = [], set(), 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = [ex.submit(one_record, chunks, seen) for _ in range(int(N_NEW * 1.6))]
+        futures = [ex.submit(one_record, chunks, seen) for _ in range(int(N_NEW * 1.8))]
         for fut in as_completed(futures):
+            done += 1
             rec, nq = fut.result()
             if rec and nq not in lock_seen:
                 lock_seen.add(nq); seen.add(nq); kept.append(rec)
-                if len(kept) % 10 == 0:
-                    print(f"  kept {len(kept)}", flush=True)
+            if done % 20 == 0:
+                print(f"  ...{done} attempts, {len(kept)} kept", flush=True)
             if len(kept) >= N_NEW:
                 break
     print(f"Generated {len(kept)} new grounded, judge-passed examples.")
