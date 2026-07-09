@@ -27,8 +27,8 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from openai import OpenAI
 
 # ------------------------------- Config -----------------------------------------------------
-GEN_MODEL   = "meta-llama/Meta-Llama-3.3-70B-Instruct"
-JUDGE_MODEL = "meta-llama/Meta-Llama-3.3-70B-Instruct"
+GEN_MODEL   = "meta-llama/Llama-3.3-70B-Instruct-Turbo"   # DeepInfra model id (verify with client.models.list())
+JUDGE_MODEL = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
 BASE_URL    = "https://api.deepinfra.com/v1/openai"
 
 MANUAL_PATH = "sharp_cv_p09fx_manual_en_cleaned.md"
