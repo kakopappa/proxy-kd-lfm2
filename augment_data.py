@@ -170,8 +170,18 @@ def to_chatml(question, reasoning, answer):
     return {"text": text}
 
 # ------------------------------- Main -------------------------------------------------------
+def _lead(v, key):
+    """Leading alphabetic word of a judge value, lowercased (robust to case/punctuation)."""
+    return re.split(r"[^a-z]", str(v.get(key, "")).strip().lower() + " ")[0]
+
+def _passes(v):
+    # accepts only the top grade of each dimension, but tolerant of case/formatting
+    return (_lead(v, "groundedness") == "grounded"
+            and _lead(v, "accuracy") == "accurate"
+            and _lead(v, "relevance") == "relevant")
+
 def one_record(chunks, seen):
-    for _ in range(3):  # a few tries to pass the judge / dedup
+    for _ in range(2):  # a couple tries to pass the judge / dedup
         chunk = random.choice(chunks)
         qa = gen_qa(chunk, random.choice(QUESTION_TYPES),
                     random.choice(list(PHRASING_STYLES)), random.choice(DIFFICULTIES))
@@ -181,10 +191,7 @@ def one_record(chunks, seen):
         if norm_q(q) in seen:
             continue
         v = judge(chunk, q, qa["answer"])
-        if not v:
-            continue
-        if (v.get("groundedness") == "Grounded" and v.get("accuracy") == "Accurate"
-                and v.get("relevance") == "Relevant"):
+        if v and _passes(v):
             return to_chatml(q, qa.get("reasoning", ""), qa["answer"]), norm_q(q)
     return None, None
 
@@ -205,8 +212,8 @@ def main():
             rec, nq = fut.result()
             if rec and nq not in lock_seen:
                 lock_seen.add(nq); seen.add(nq); kept.append(rec)
-                if len(kept) % 25 == 0:
-                    print(f"  kept {len(kept)}")
+                if len(kept) % 10 == 0:
+                    print(f"  kept {len(kept)}", flush=True)
             if len(kept) >= N_NEW:
                 break
     print(f"Generated {len(kept)} new grounded, judge-passed examples.")
