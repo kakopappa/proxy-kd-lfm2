@@ -22,8 +22,7 @@ Run (local):  set env var DEEPINFRA_API_KEY, then `python augment_data.py`
 Deps:         pip install openai
 """
 
-import os, re, json, random, hashlib
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import os, re, json, random
 from openai import OpenAI
 
 # ------------------------------- Config -----------------------------------------------------
@@ -36,9 +35,8 @@ TRAIN_IN    = "ac_manual_synth_tra.jsonl"   # existing 185 Claude pairs (kept)
 VAL_IN      = "ac_manual_synth_val.jsonl"   # 32 held-out (used only for anti-leakage dedup)
 TRAIN_OUT   = "ac_manual_synth_tra_aug.jsonl"
 
-N_NEW       = 300     # target NEW kept examples (on top of the existing 185)
-MAX_WORKERS = 3       # DeepInfra rate-limits higher concurrency -> backoff stalls throughput
-SEED        = 0
+N_NEW       = 150     # target NEW kept examples (on top of the existing 185)
+SEED        = 0       # NOTE: sequential — DeepInfra throttles concurrency into hangs
 
 SYSTEM = ("You are a helpful assistant for the Sharp CV-P09FX portable air conditioner. "
           "Answer questions accurately based on the product manual.")
@@ -152,10 +150,9 @@ def gen_qa(chunk, qtype, phrasing, difficulty):
         f"<context>\n{chunk}\n</context>\n\n"
         "Return JSON with keys:\n"
         '  "question": a self-contained question a real user would ask, answerable from the context.\n'
-        '  "reasoning": step-by-step reasoning that locates the relevant facts in the context.\n'
         '  "answer": the final, clean, accurate answer grounded strictly in the context (no invented facts).\n'
     )
-    return _json_call(GEN_MODEL, prompt, temperature=0.8)
+    return _json_call(GEN_MODEL, prompt, temperature=0.8, max_tokens=400)
 
 def judge(chunk, q, a):
     prompt = (
@@ -169,11 +166,11 @@ def judge(chunk, q, a):
     return _json_call(JUDGE_MODEL, prompt, temperature=0.1, max_tokens=200)
 
 # ------------------------------- ChatML writer ----------------------------------------------
-def to_chatml(question, reasoning, answer):
-    assistant = f"<think>\n{reasoning.strip()}\n</think>\n{answer.strip()}"
+def to_chatml(question, answer):
+    # answer only (no <think>) — training strips <think> anyway (STRIP_THINK)
     text = (f"<|im_start|>system\n{SYSTEM}<|im_end|>\n"
             f"<|im_start|>user\n{question.strip()}<|im_end|>\n"
-            f"<|im_start|>assistant\n{assistant}<|im_end|>")
+            f"<|im_start|>assistant\n{answer.strip()}<|im_end|>")
     return {"text": text}
 
 # ------------------------------- Main -------------------------------------------------------
@@ -201,42 +198,46 @@ def one_record(chunks, seen):
             continue
         v = judge(chunk, q, qa["answer"])
         if v and _passes(v):
-            return to_chatml(q, qa.get("reasoning", ""), qa["answer"]), norm_q(q)
+            return to_chatml(q, qa["answer"]), norm_q(q)
     return None, None
 
-def main():
+def main(n_new=N_NEW, resume=True):
+    """Sequential + incremental. DeepInfra throttles concurrency into hangs, so we run one
+    request at a time and append each kept example to TRAIN_OUT immediately (resumable)."""
     assert os.environ.get("DEEPINFRA_API_KEY"), \
         "Set DEEPINFRA_API_KEY (Colab Secrets -> os.environ, or an env var)."
-    manual = open(MANUAL_PATH, encoding="utf-8").read()
-    chunks = chunk_manual(manual)
-    print(f"Manual chunks: {len(chunks)}")
+    chunks = chunk_manual(open(MANUAL_PATH, encoding="utf-8").read())
+    print(f"Manual chunks: {len(chunks)}", flush=True)
 
     seen = set(norm_q(q) for q in load_questions(TRAIN_IN) + load_questions(VAL_IN))
-    print(f"Existing questions (train+val, for dedup): {len(seen)}")
-
-    kept, lock_seen, done = [], set(), 0
-    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = [ex.submit(one_record, chunks, seen) for _ in range(int(N_NEW * 1.8))]
-        for fut in as_completed(futures):
-            done += 1
-            rec, nq = fut.result()
-            if rec and nq not in lock_seen:
-                lock_seen.add(nq); seen.add(nq); kept.append(rec)
-            if done % 20 == 0:
-                print(f"  ...{done} attempts, {len(kept)} kept", flush=True)
-            if len(kept) >= N_NEW:
-                break
-    print(f"Generated {len(kept)} new grounded, judge-passed examples.")
-
-    # existing 185 Claude pairs are kept verbatim, new ones appended
     existing = [json.loads(l) for l in open(TRAIN_IN, encoding="utf-8") if l.strip()]
-    out = existing + kept
-    random.shuffle(out)
-    with open(TRAIN_OUT, "w", encoding="utf-8") as f:
-        for r in out:
-            f.write(json.dumps(r, ensure_ascii=False) + "\n")
-    print(f"Wrote {TRAIN_OUT}: {len(existing)} Claude + {len(kept)} new = {len(out)} train examples "
-          f"(val untouched: {VAL_IN}).")
+
+    # seed the output with the 185 Claude pairs, unless resuming an in-progress file
+    have_new = 0
+    if resume and os.path.exists(TRAIN_OUT):
+        prev = [l for l in open(TRAIN_OUT, encoding="utf-8") if l.strip()]
+        have_new = max(0, len(prev) - len(existing))
+        for q in load_questions(TRAIN_OUT):
+            seen.add(norm_q(q))
+        print(f"Resuming: {have_new} new already in {TRAIN_OUT}", flush=True)
+    else:
+        with open(TRAIN_OUT, "w", encoding="utf-8") as f:
+            for r in existing:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
+    kept, attempts = have_new, 0
+    fout = open(TRAIN_OUT, "a", encoding="utf-8")
+    while kept < n_new and attempts < n_new * 4:
+        attempts += 1
+        rec, nq = one_record(chunks, seen)
+        if rec and nq not in seen:
+            seen.add(nq); kept += 1
+            fout.write(json.dumps(rec, ensure_ascii=False) + "\n"); fout.flush()
+            if kept % 5 == 0:
+                print(f"  kept {kept}/{n_new} (attempt {attempts})", flush=True)
+    fout.close()
+    print(f"Done. {TRAIN_OUT}: {len(existing)} Claude + {kept} new = {len(existing)+kept} train "
+          f"(val untouched: {VAL_IN}).", flush=True)
 
 if __name__ == "__main__":
     main()
