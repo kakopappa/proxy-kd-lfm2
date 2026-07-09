@@ -175,10 +175,12 @@ def _lead(v, key):
     return re.split(r"[^a-z]", str(v.get(key, "")).strip().lower() + " ")[0]
 
 def _passes(v):
-    # accepts only the top grade of each dimension, but tolerant of case/formatting
-    return (_lead(v, "groundedness") == "grounded"
-            and _lead(v, "accuracy") == "accurate"
-            and _lead(v, "relevance") == "relevant")
+    # Accuracy is what we care about -> require the top grade. Groundedness/relevance:
+    # only reject the WORST grade (the judge over-marks terse-but-correct answers as
+    # "PartiallyGrounded", which we still want to keep).
+    return (_lead(v, "accuracy") == "accurate"
+            and _lead(v, "groundedness") != "ungrounded"
+            and _lead(v, "relevance") != "irrelevant")
 
 def one_record(chunks, seen):
     for _ in range(2):  # a couple tries to pass the judge / dedup
